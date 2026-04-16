@@ -1,99 +1,94 @@
 # PNC Generator Service
 
-The **PNC Generator Service** is a specialized microservice within the SBOMer architecture responsible for executing SBOM generation requests based on builds done by [Project Newcastle (PNC)](https://github.com/project-ncl).
+The **PNC Generator Service** is a specialized microservice within the SBOMer architecture responsible for executing SBOM generation requests based on builds performed by [Project Newcastle (PNC)](https://github.com/project-ncl).
 
-It acts as an **Event-Driven Processor** that listens for generation request events, retrieves complex build data from PNC, constructs SBOMs from the build data in CycloneDX specification, and uploads the resulting SBOMs.
+Unlike legacy generators that require heavy, resource-intensive build pods, this service acts as a high-performance **API-Driven Synthesizer**. It retrieves structured build metadata and SLSA provenance from PNC to construct a complete, cryptographically-linked SBOM in the CycloneDX specification.
 
-## Architecture (TODO update to pnc generator)
+---
+
+## Architecture
 
 This service follows **Hexagonal Architecture (Ports and Adapters)** to decouple the business logic of SBOM construction from external infrastructure constraints like Kafka or PNC APIs.
 
 ### 1. Core Domain (Business Logic)
-* **`DelaGenerationService`:** The "Brain". It manages the orchestration of the generation request, groups analyzed artifacts by their parent deliverables (ZIPs/TGZs), orchestrates the SBOM construction, and handles the overarching failure state machine.
-* **`CycloneDxMapper`:** Translates raw PNC `AnalyzedArtifact` objects into CycloneDX `Component` objects. It handles coordinate extraction (Maven/NPM), hashes, SPDX licenses, PNC traceability, and ecosystem-specific tagging.
-* **`NpmDependencyWorkaroundService`:** Identifies components built by non-NPM PNC builds and dynamically injects their hidden build-time NPM dependencies into the CycloneDX tree.
+* **`PncBuildGenerationService`**: The "Brain". It manages the orchestration of the generation request. It fetches the PNC Build metadata, identifies produced artifacts, retrieves the SLSA Provenance graph, and synthesizes them into a single aggregate SBOM.
+* **SLSA-to-CycloneDX Mapping**: Maps the SLSA `subject` array to primary components and the `resolvedDependencies` array to upstream library components. It ensures the root component is enriched with hashes and pedigree and is duplicated at the top of the components array for platform compatibility.
 
 ### 2. Driving Adapters (Input)
-* **`KafkaRequestConsumer`:** Listens to the `generation.created` topic. If the request's target type matches `PNC_DELA`, it initiates the generation process.
+* **`KafkaRequestConsumer`**: Listens to the `generation.created` topic. If the request's target type matches `PNC_BUILD`, it initiates the generation process.
 
 ### 3. Driven Adapters (Output)
-* **`PncServiceAdapter`:** Communicates with the PNC APIs to retrieve Operation metadata, Analyzed Artifacts, and NPM Dependencies. It wraps the official PNC Java clients and includes a Quarkus REST Client fallback (`PncRestApiClient`).
-* **`HttpStorageServiceAdapter`:** Packages the generated JSON SBOMs into `multipart/form-data` payloads and uploads them atomically to the [Manifest Storage Service](https://github.com/sbomer-project/manifest-storage-service).
-* **`KafkaStatusUpdateService` & `KafkaFailureNotifier`:** Sends `generation.update` events (GENERATING, FINISHED, FAILED) back to the control plane, and routes catastrophic runtime errors to the `sbomer.errors` dead-letter queue.
+* **`PncServiceAdapter`**: Communicates with the PNC APIs to retrieve Build metadata, artifact lists, and SLSA provenance. It wraps the official PNC Java clients and includes a Quarkus REST Client fallback (`PncRestApiClient`) for the new SLSA provenance endpoints.
+* **`HttpStorageServiceAdapter`**: Packages the generated JSON SBOMs and uploads them atomically to the [Manifest Storage Service](https://github.com/sbomer-project/manifest-storage-service).
+* **`KafkaStatusUpdateService`**: Sends `generation.update` events (GENERATING, FINISHED, FAILED) back to the control plane.
 
 ---
 
 ## Features
 
-### 1. Multi-Deliverable Support
-A single PNC Operation can analyze multiple archives. The service automatically groups artifacts by `distributionUrl` and generates a distinct SBOM for every deliverable archive found in the operation, uploading them in a batch.
+### 1. API-Driven Synthesis (No Tekton/Maven)
+This service eliminates the need for Tekton build pods or the `cyclonedx-maven-plugin`. By synthesizing the SBOM from PNC's existing database records, it reduces generation time from minutes to milliseconds and significantly lowers CPU and memory consumption.
 
-### 2. Red Hat Ecosystem Tagging
-The service automatically detects Red Hat artifacts (via `.redhat-xxxxx` version suffixes or `%40redhat` PURLs). When detected, it actively stamps the CycloneDX components with Red Hat Publisher, Supplier, and MRRC distribution metadata.
+### 2. SLSA Provenance Integration
+The service utilizes the SLSA Build Provenance specification to build the dependency tree. It distinguishes between **Subjects** (the artifacts produced by the build) and **Resolved Dependencies** (the artifacts consumed during the build), creating a highly accurate execution-based dependency graph.
 
-### 3. Deep PNC Traceability
-To ensure complete provenance, the generator injects CycloneDX `ExternalReferences` into every component, linking directly back to the PNC Artifact, the PNC Build, the Environment Image used during the build, and the upstream VCS repository.
+### 3. Red Hat Ecosystem Tagging
+The service automatically detects Red Hat artifacts via `.redhat-xxxxx` version suffixes or PURLs. When detected, it stamps the CycloneDX components with Red Hat Publisher, Supplier, and official Red Hat Maven distribution metadata.
 
-### 4. Safe NPM Parsing & Workarounds
-The service implements graceful fallbacks for malformed NPM coordinates originating from upstream libraries. Additionally, it actively fetches PNC Builds to discover and inject hidden NPM dependencies that the standard Deliverables Analyzer might miss during Java-based builds.
+### 4. Native Traceability
+Using SLSA provenance annotations, the generator injects `pnc-artifact-id` and `pnc-build-id` into every component (both built and consumed) as CycloneDX `ExternalReferences`, providing a direct cryptographic link back to the build system records.
 
 ### 5. Deterministic Serial Numbers
-To ensure reproducible builds and predictable updates, the service generates UUID v3 (Name-based) serial numbers based on the raw JSON content of the BOM before finalizing the document.
+To ensure reproducible SBOMs and predictable updates, the service generates UUID v3 (Name-based) serial numbers based on the raw JSON content of the BOM before finalization.
 
 ---
 
 ## Configuration
 
-| Property                                     | Description                                                                 | Default                  |
-|:---------------------------------------------|:----------------------------------------------------------------------------|:-------------------------|
-| `sbomer.generator.tool.name`                 | The name of the tool injected into the Root Component metadata.             | `SBOMer NextGen`         |
-| `sbomer.generator.tool.version`              | The version of the tool injected into the Root Component metadata.          | `1.0.0`                  |
-| `sbomer.generator.supplier.name`             | The supplier name injected into the Root Component metadata.                | `Red Hat`                |
-| `sbomer.generator.supplier.urls`             | Comma-separated list of supplier URLs for the Root Component metadata.      | `https://www.redhat.com` |
-| `pnc.api.url`                                | The base URL for the PNC official Java Clients to fetch analysis data.      | *(Environment specific)* |
+| Property | Description | Default |
+| :--- | :--- | :--- |
+| `sbomer.generator.tool.name` | The name of the tool injected into the Root Component metadata. | `SBOMer NextGen` |
+| `sbomer.generator.tool.version` | The version of the tool injected into the Root Component metadata. | `1.0.0` |
+| `sbomer.generator.supplier.name` | The supplier name injected into the Root Component metadata. | `Red Hat` |
+| `sbomer.generator.supplier.urls` | Comma-separated list of supplier URLs for the Root Component metadata. | `https://www.redhat.com` |
+| `pnc.api.url` | The base URL for the PNC official Java Clients to fetch build data. | *(Environment specific)* |
+
 ---
 
 ## Development Environment Setup
 
-We can run this component in a **Minikube Environment** by injecting it as part of the sbomer-platform helm chart and installing it into our cluster.
-
-We provide helper scripts in the `hack/` directory to automate the networking and configuration between these two environments.
+We can run this component in a **Minikube Environment** by injecting it as part of the `sbomer-platform` helm chart.
 
 ### 1. Prerequisites
 * **Podman** (or Docker)
 * **Minikube**
-* **Helm**
-* **Maven** & **Java 17+**
-* **Kubectl**
+* **Helm**, **Kubectl**, **Maven**, **Java 17+**
 
 ### 2. Prepare the Cluster
-First, we need to ensure we have the `sbomer` Minikube profile running with Tekton and Kafka installed.
-
-To do this we have a dedicated repository and script:
+First, ensure the `sbomer` Minikube profile is running:
 
 ```bash
 ./hack/setup-local-dev.sh
 ```
 
 ### 3. Run the Component with Helm in Minikube
-Use the `./hack/run-helm-with-local-build.sh` script to start the system. This script performs several critical steps:
+Use the provided script to build the `pnc-generator` image and deploy it into the cluster:
 
-- Clones `sbomer-platform` into the component repository.
-- Builds the component image (`dela-generator`) and loads it directly into the Minikube registry.
-- Injects the locally built component values into the `sbomer-platform` Helm chart.
-- Installs the `sbomer-platform` Helm chart with our locally built component.
+```bash
+./hack/run-helm-with-local-build.sh
+```
 
 ### 4. Verify the Installation
-Once the script completes, you can verify the status of the generator pod:
+Verify the status of the generator pod:
 
 ```bash
-kubectl get pods -n sbomer
+kubectl get pods -n sbomer | grep pnc-generator
 ```
 
-You can then use the provided test script in the hack/ directory to trigger a test generation after port-forwarding the API Gateway (mentioned at the end of the `./hack/run-helm-with-local-build.sh` script):
+Trigger a test generation using the provided script:
 
 ```bash
-./hack/test-dela-gen.sh
+./hack/test-pnc-gen.sh
 ```
 
-*(Note: To avoid PNC connection setup, the minikube deployment uses the PNC Mock Adapter to generate mock SBOMs, the prod deployment without the mock profile defined, will use the real PNC Adapter).*
+*(Note: During local development, the service uses the `MockPncServiceAdapter` to provide anonymized, fake build data, avoiding the need for a direct VPN connection to internal PNC production servers).*
