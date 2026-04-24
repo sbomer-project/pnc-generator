@@ -36,8 +36,6 @@ class PncServiceAdapterTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        // Because buildClient is normally instantiated inside @PostConstruct,
-        // we use reflection to inject the mock into the adapter for testing.
         Field field = PncServiceAdapter.class.getDeclaredField("buildClient");
         field.setAccessible(true);
         field.set(adapter, buildClient);
@@ -59,19 +57,17 @@ class PncServiceAdapterTest {
 
     @Test
     void testGetBuild_NotFound_ReturnsNull() throws ClientException {
-        // Mock the strict PNC exception to avoid JAX-RS constructor requirements
         RemoteResourceNotFoundException notFoundMock = mock(RemoteResourceNotFoundException.class);
         when(buildClient.getSpecific("999")).thenThrow(notFoundMock);
 
         Build actualBuild = adapter.getBuild("999");
 
-        assertNull(actualBuild); // Handled gracefully by returning null
+        assertNull(actualBuild);
         verify(buildClient, times(1)).getSpecific("999");
     }
 
     @Test
     void testGetBuild_GenericException_ThrowsRuntimeException() throws ClientException {
-        // Mock the strict PNC exception
         RemoteResourceException errorMock = mock(RemoteResourceException.class);
         when(buildClient.getSpecific("error-id")).thenThrow(errorMock);
 
@@ -101,7 +97,6 @@ class PncServiceAdapterTest {
 
     @Test
     void testGetBuiltArtifacts_NotFound_ThrowsException() throws ClientException {
-        // Mock the strict PNC exception
         RemoteResourceNotFoundException notFoundMock = mock(RemoteResourceNotFoundException.class);
         when(buildClient.getBuiltArtifacts(anyString())).thenThrow(notFoundMock);
 
@@ -113,12 +108,13 @@ class PncServiceAdapterTest {
 
     @Test
     void testGetBuildProvenance_Success() {
-        SlsaProvenance mockProvenance = new SlsaProvenance(null, List.of());
+        SlsaProvenance mockProvenance = new SlsaProvenance("https://slsa.dev/provenance/v1", null, List.of());
         when(pncRestClient.getBuildProvenanceFallback("art-1")).thenReturn(mockProvenance);
 
         SlsaProvenance result = adapter.getBuildProvenance("art-1");
 
         assertNotNull(result);
+        assertEquals("https://slsa.dev/provenance/v1", result.predicateType());
         verify(pncRestClient, times(1)).getBuildProvenanceFallback("art-1");
     }
 

@@ -43,7 +43,7 @@ class KafkaStatusUpdateServiceTest {
         verify(emitter).send(captor.capture());
 
         GenerationUpdate sentEvent = captor.getValue();
-        assertEquals("dela-generator", sentEvent.getContext().getSource());
+        assertEquals("pnc-generator", sentEvent.getContext().getSource());
         assertEquals("GEN-100", sentEvent.getData().getGenerationId());
         assertEquals("GENERATING", sentEvent.getData().getStatus());
         assertEquals(0, sentEvent.getData().getResultCode());

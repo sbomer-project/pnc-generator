@@ -67,12 +67,11 @@ public class PncBuildGenerationService implements GenerationProcessor {
 
     @Override
     @WithSpan
-    @Bulkhead(value = 10) // Can be higher than DelA since we aren't parsing massive ZIPs in memory
+    @Bulkhead(value = 10)
     public void processGeneration(GenerationCreated event) {
         String generationId = event.getData().getGenerationRequest().getGenerationId();
         String buildId = event.getData().getGenerationRequest().getTarget().getIdentifier();
 
-        // OTel Tracing Attributes
         Span span = Span.current();
         span.setAttribute("sbom.generationId", generationId);
         span.setAttribute("pnc.buildId", buildId);
@@ -82,7 +81,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
         try {
             statusUpdateService.reportGenerating(generationId);
 
-            // 1. Fetch Build & identify the first built artifact to fetch SLSA Provenance
             Build build = pncService.getBuild(buildId);
             if (build == null) {
                 throw new IllegalStateException("PNC Build " + buildId + " not found.");
@@ -102,10 +100,8 @@ public class PncBuildGenerationService implements GenerationProcessor {
                 throw new IllegalStateException("SLSA Provenance is empty or invalid for artifact " + firstArtifactId);
             }
 
-            // 2. Generate the SBOM
             String sbomJson = generateCycloneDxJson(build, provenance);
 
-            // 3. Store and Update
             String uploadedUrl = storageService.uploadSbom(generationId, sbomJson);
             statusUpdateService.reportFinished(generationId, List.of(uploadedUrl));
 
@@ -119,7 +115,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
     private String generateCycloneDxJson(Build build, SlsaProvenance provenance) {
         Bom bom = new Bom();
 
-        // --- 1. Construct Root Component (From Build Attributes) ---
         Map<String, String> attributes = build.getAttributes() != null ? build.getAttributes() : Map.of();
         String brewName = attributes.getOrDefault("BREW_BUILD_NAME", "unknown-group:unknown-name");
         String brewVersion = attributes.getOrDefault("BREW_BUILD_VERSION", "unknown-version");
@@ -138,7 +133,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
         rootComponent.setBomRef(rootPurl);
         rootComponent.setType(Component.Type.LIBRARY);
 
-        // Metadata Setup
         Metadata metadata = new Metadata();
         metadata.setTimestamp(new java.util.Date());
         metadata.setComponent(rootComponent);
@@ -156,7 +150,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
         metadata.setSupplier(supplier);
         bom.setMetadata(metadata);
 
-        // --- 2. Track Dependencies for the Graph ---
         Dependency rootDependency = new Dependency(rootPurl);
         bom.addDependency(rootDependency);
 
@@ -165,34 +158,28 @@ public class PncBuildGenerationService implements GenerationProcessor {
 
         boolean rootFoundInSubjects = false;
 
-        // --- 3. Map Built Subjects (with Pedigree) ---
+        // Map Built Subjects
         for (SlsaSubject subject : provenance.subject()) {
-            Component subjectComp = mapSubject(subject, build);
+            Component subjectComp = mapSubject(subject, provenance); // Pass provenance down instead of build
 
-            // Prevent duplicate bom-refs
             if (bom.getComponents().stream().noneMatch(c -> c.getBomRef().equals(subjectComp.getBomRef()))) {
                 bom.addComponent(subjectComp);
             }
 
             if (subjectComp.getBomRef().equals(rootPurl)) {
-                // This subject IS the root! Update metadata to use this rich component instead of the basic fallback
                 metadata.setComponent(subjectComp);
                 rootFoundInSubjects = true;
-                // Do NOT add it as a dependency of itself!
             } else {
                 Dependency subjectDep = new Dependency(subjectComp.getBomRef());
-                rootDependency.addDependency(subjectDep); // Root depends on built subjects
+                rootDependency.addDependency(subjectDep);
                 subjectDependencies.add(subjectDep);
-
                 bom.addDependency(subjectDep);
             }
         }
 
-        // --- 3.5. Ensure Root Component is at the top of the components array ---
         if (!rootFoundInSubjects) {
-            bom.getComponents().add(0, rootComponent); // Put basic fallback at the top
+            bom.getComponents().add(0, rootComponent);
         } else {
-            // Move the rich root component to the very first index
             Component richRoot = bom.getComponents().stream()
                     .filter(c -> c.getBomRef().equals(rootPurl))
                     .findFirst().orElse(null);
@@ -202,17 +189,18 @@ public class PncBuildGenerationService implements GenerationProcessor {
             }
         }
 
-        // --- 4. Map Resolved Dependencies (Upstream) ---
+        // Map Resolved Dependencies
         if (provenance.predicate() != null && provenance.predicate().resolvedDependencies() != null) {
             for (SlsaDependency slsaDep : provenance.predicate().resolvedDependencies()) {
-                // Skip meta records (repository, environment, etc. lacking a PURL)
+
+                // Skip meta records (repository, environment, etc.) from being components in the BOM
+                // We extract them separately for pedigree/environment tracking
                 if (slsaDep.annotations() == null || slsaDep.annotations().purl() == null) {
                     continue;
                 }
 
                 Component depComp = mapResolvedDependency(slsaDep);
 
-                // Prevent duplicate bom-refs if a dependency somehow matches an already mapped subject
                 if (bom.getComponents().stream().noneMatch(c -> c.getBomRef().equals(depComp.getBomRef()))) {
                     bom.addComponent(depComp);
                 }
@@ -220,29 +208,24 @@ public class PncBuildGenerationService implements GenerationProcessor {
                 Dependency resolvedDepNode = new Dependency(depComp.getBomRef());
                 bom.addDependency(resolvedDepNode);
 
-                // In a build, the built subjects depend on the resolved dependencies
                 for (Dependency subjectDep : subjectDependencies) {
                     subjectDep.addDependency(resolvedDepNode);
                 }
             }
         }
 
-        // --- 5. Generate Deterministic UUID and JSON ---
         try {
             BomJsonGenerator generator = new BomJsonGenerator(bom, Version.VERSION_16);
             String rawJson = generator.toJsonString();
-
             String deterministicUuid = UUID.nameUUIDFromBytes(rawJson.getBytes(StandardCharsets.UTF_8)).toString();
             bom.setSerialNumber("urn:uuid:" + deterministicUuid);
-
-            // Re-generate to include the newly set serialNumber
             return new BomJsonGenerator(bom, Version.VERSION_16).toJsonString();
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize CycloneDX BOM to JSON", e);
         }
     }
 
-    private Component mapSubject(SlsaSubject subject, Build build) {
+    private Component mapSubject(SlsaSubject subject, SlsaProvenance provenance) {
         Component c = new Component();
         c.setType(Component.Type.LIBRARY);
         c.setName(subject.name());
@@ -251,7 +234,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
             c.setPurl(subject.annotations().purl());
             c.setBomRef(subject.annotations().purl());
 
-            // Try extracting group/name/version from PURL
             try {
                 PackageURL purl = new PackageURL(subject.annotations().purl());
                 c.setGroup(purl.getNamespace());
@@ -267,8 +249,10 @@ public class PncBuildGenerationService implements GenerationProcessor {
         }
 
         c.setHashes(mapHashes(subject.digest()));
-        mapPncTraceability(c, subject.annotations(), build);
-        mapPedigree(c, build);
+
+        // Use the SLSA Provenance payload for deep traceability
+        mapPncTraceability(c, subject.annotations(), provenance);
+        mapPedigree(c, provenance);
         applyRedHatMetadataIfApplicable(c);
 
         return c;
@@ -291,6 +275,8 @@ public class PncBuildGenerationService implements GenerationProcessor {
         }
 
         c.setHashes(mapHashes(slsaDep.digest()));
+
+        // Pass null for provenance here because upstream libraries don't share the build's environment/pedigree
         mapPncTraceability(c, slsaDep.annotations(), null);
         applyRedHatMetadataIfApplicable(c);
 
@@ -308,7 +294,7 @@ public class PncBuildGenerationService implements GenerationProcessor {
         return hashes;
     }
 
-    private void mapPncTraceability(Component c, org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaAnnotations annotations, Build build) {
+    private void mapPncTraceability(Component c, org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaAnnotations annotations, SlsaProvenance provenance) {
         if (annotations == null) return;
 
         // Artifact ID Traceability
@@ -316,38 +302,35 @@ public class PncBuildGenerationService implements GenerationProcessor {
             addExternalReference(c, ExternalReference.Type.BUILD_SYSTEM, pncApiUrl + "/pnc-rest/v2/artifacts/" + annotations.artifactId(), "pnc-artifact-id");
         }
 
-        // Build ID Traceability
+        // Build ID Traceability (Now supported on dependencies too)
         if (annotations.buildId() != null) {
             addExternalReference(c, ExternalReference.Type.BUILD_SYSTEM, pncApiUrl + "/pnc-rest/v2/builds/" + annotations.buildId(), "pnc-build-id");
         }
 
-        // Environment & VCS Traceability (Only available for Subjects, passed via `build` param)
-        if (build != null) {
-            if (build.getEnvironment() != null) {
-                addExternalReference(c, ExternalReference.Type.BUILD_META, build.getEnvironment().getSystemImageRepositoryUrl() + "/" + build.getEnvironment().getSystemImageId(), "pnc-environment-image");
-            }
-            if (build.getScmRepository() != null && build.getScmRepository().getExternalUrl() != null) {
-                addExternalReference(c, ExternalReference.Type.VCS, build.getScmRepository().getExternalUrl(), null);
-            }
+        // Environment Traceability from SLSA v1.0
+        if (provenance != null && provenance.predicate() != null && provenance.predicate().resolvedDependencies() != null) {
+            provenance.predicate().resolvedDependencies().stream()
+                    .filter(dep -> "environment".equals(dep.name()) && dep.uri() != null)
+                    .findFirst()
+                    .ifPresent(envDep -> addExternalReference(c, ExternalReference.Type.BUILD_META, envDep.uri(), "pnc-environment-image"));
         }
     }
 
-    private void mapPedigree(Component component, Build build) {
-        if (build == null) return;
+    private void mapPedigree(Component component, SlsaProvenance provenance) {
+        if (provenance == null || provenance.predicate() == null || provenance.predicate().resolvedDependencies() == null) return;
 
         List<Component> ancestorsList = new ArrayList<>();
         List<Commit> commitsList = new ArrayList<>();
 
-        if (build.getScmUrl() != null && build.getScmRevision() != null) {
-            String fullUrl = build.getScmTag() != null && !build.getScmTag().isBlank()
-                    ? build.getScmUrl() + "#" + build.getScmTag() : build.getScmUrl();
-            addPedigreeAncestor(ancestorsList, commitsList, component.getName(), fullUrl, build.getScmRevision());
-        }
+        // Hunt through resolvedDependencies for the "repository" items (SLSA v1.0 spec)
+        for (SlsaDependency dep : provenance.predicate().resolvedDependencies()) {
+            if (dep.name() != null && dep.name().startsWith("repository") && dep.uri() != null && dep.digest() != null) {
 
-        if (build.getScmRepository() != null && build.getScmRepository().getExternalUrl() != null
-                && build.getScmBuildConfigRevision() != null && build.getBuildConfigRevision() != null) {
-            String fullUrl = build.getScmRepository().getExternalUrl() + "#" + build.getBuildConfigRevision().getScmRevision();
-            addPedigreeAncestor(ancestorsList, commitsList, component.getName(), fullUrl, build.getScmBuildConfigRevision());
+                String gitCommit = dep.digest().get("gitCommit");
+                if (gitCommit != null) {
+                    addPedigreeAncestor(ancestorsList, commitsList, component.getName(), dep.uri(), gitCommit);
+                }
+            }
         }
 
         if (!ancestorsList.isEmpty() || !commitsList.isEmpty()) {
@@ -365,7 +348,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
     private void addPedigreeAncestor(List<Component> ancestorsList, List<Commit> commitsList, String fallbackName, String fullUrl, String commitHash) {
         if (fullUrl == null || fullUrl.isBlank()) return;
 
-        // Ancestor logic
         try {
             VcsUrl vcsUrl = VcsUrl.create(fullUrl);
             PackageURL packageURL = vcsUrl.toPackageURL(commitHash);
@@ -384,7 +366,6 @@ public class PncBuildGenerationService implements GenerationProcessor {
             ancestorsList.add(ancestor);
         }
 
-        // Commit logic
         Commit commit = new Commit();
         commit.setUid(commitHash);
         commit.setUrl(fullUrl);

@@ -26,12 +26,12 @@ public class KafkaStatusUpdateService implements StatusUpdateService {
 
     @Override
     public void reportGenerating(String generationId) {
-        sendStatus(generationId, "GENERATING", "Started DELA generation", null);
+        sendStatus(generationId, "GENERATING", "Started PNC Build generation", null);
     }
 
     @Override
     public void reportFinished(String generationId, List<String> resultUrls) {
-        sendStatus(generationId, "FINISHED", "Successfully generated DELA SBOMs", resultUrls);
+        sendStatus(generationId, "FINISHED", "Successfully generated PNC Build SBOMs", resultUrls);
     }
 
     @Override
@@ -69,7 +69,7 @@ public class KafkaStatusUpdateService implements StatusUpdateService {
     private ContextSpec createContext() {
         return ContextSpec.newBuilder()
                 .setEventId(UUID.randomUUID().toString())
-                .setSource("dela-generator")
+                .setSource("pnc-generator")
                 .setType("GenerationUpdate")
                 .setTimestamp(Instant.now())
                 .setEventVersion("1.0")
