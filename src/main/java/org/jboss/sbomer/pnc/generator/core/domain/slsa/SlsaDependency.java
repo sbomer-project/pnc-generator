@@ -6,8 +6,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SlsaDependency(
-    String name,
-    Map<String, String> digest,
-    String uri,
-    SlsaAnnotations annotations
+        String name,
+        Map<String, String> digest,
+        String uri,
+        SlsaAnnotations annotations
 ) {}

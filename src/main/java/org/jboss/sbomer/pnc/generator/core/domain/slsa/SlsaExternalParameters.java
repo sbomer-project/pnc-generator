@@ -1,11 +1,12 @@
 package org.jboss.sbomer.pnc.generator.core.domain.slsa;
 
-import java.util.List;
+import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record SlsaPredicate(
-        SlsaBuildDefinition buildDefinition,
-        List<SlsaDependency> resolvedDependencies
+public record SlsaExternalParameters(
+    Map<String, Object> build,
+    Map<String, String> environment,
+    Map<String, String> repository
 ) {}

@@ -14,7 +14,9 @@ import org.jboss.pnc.dto.Environment;
 import org.jboss.pnc.dto.SCMRepository;
 import org.jboss.pnc.enums.BuildType;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaAnnotations;
+import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaBuildDefinition;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaDependency;
+import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaExternalParameters;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaPredicate;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaProvenance;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaSubject;
@@ -126,7 +128,8 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/com.acme.cloud/acme-cloud-pack@2.0.0.Final-redhat-00026?type=zip",
                         "https://nexus.acme.corp/api/content/maven/hosted/builds/...",
                         MOCK_ARTIFACT_ID_ZIP,
-                        MOCK_PNC_BUILD_ID
+                        MOCK_PNC_BUILD_ID,
+                        null
                 )
         );
 
@@ -138,7 +141,8 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/com.acme.cloud/acme-cloud-pack-parent@2.0.0.Final-redhat-00026?type=pom",
                         "https://nexus.acme.corp/api/content/maven/hosted/builds/...",
                         MOCK_ARTIFACT_ID_POM,
-                        MOCK_PNC_BUILD_ID
+                        MOCK_PNC_BUILD_ID,
+                        null
                 )
         );
 
@@ -150,8 +154,31 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/com.acme.cloud/acme-cloud-pack@2.0.0.Final-redhat-00026?classifier=manifest&type=yaml",
                         "https://nexus.acme.corp/api/content/maven/hosted/builds/...",
                         MOCK_ARTIFACT_ID_YAML,
-                        MOCK_PNC_BUILD_ID
+                        MOCK_PNC_BUILD_ID,
+                        null
                 )
+        );
+
+        // --- DEPENDENCIES (Meta Nodes for Pedigree and Environment tracking) ---
+        SlsaDependency repoDep = new SlsaDependency(
+                "repository",
+                Map.of("gitCommit", "810cd23b2f83e6f7cf59c7bd81add58fa1b7fa10"),
+                "https://git.acme.corp/acme-internal/acme-cloud-pack.git",
+                null
+        );
+
+        SlsaDependency repoDownstreamDep = new SlsaDependency(
+                "repository.downstream",
+                Map.of("gitCommit", "213344e112f8f25859c0656ef226ca5d07e2da0c"),
+                "https://github.com/acme-org/acme-cloud-pack.git",
+                new SlsaAnnotations(null, null, null, null, null, "2.0.0.Final-redhat-1")
+        );
+
+        SlsaDependency envDep = new SlsaDependency(
+                "environment",
+                Map.of("sha256", "fb130c764b0792751eedd37dd27230d7c4aa8a8a6c3069825d13f6771ffe7c1a"),
+                "quay.io/acme-internal/builder-linux-j17-mvn3.9.3@sha256:fb130c764b0792751eedd37dd27230d7c4aa8a8a6c3069825d13f6771ffe7c1a",
+                new SlsaAnnotations(null, null, null, null, null, "1.0.0")
         );
 
         // --- DEPENDENCIES (What was consumed) ---
@@ -164,7 +191,8 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/com.acme.corp/acme-clustering-web-service@8.1.1.GA-redhat-00015?type=jar",
                         "https://nexus.acme.corp/api/content/maven/hosted/builds/...",
                         "8888",
-                        "BUILD-8888"
+                        "BUILD-8888",
+                        null
                 )
         );
 
@@ -178,11 +206,12 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/org.slf4j/slf4j-api@1.7.30?type=pom",
                         "https://nexus.acme.corp/api/content/maven/hosted/shared-imports/...",
                         "8889",
-                        null // External OSS might not have a PNC Build ID!
+                        null, // External OSS might not have a PNC Build ID
+                        null
                 )
         );
 
-        // Another Red Hat built dependency
+        // Another Red Hat built dependency (Has upstream Build ID)
         SlsaDependency dep3 = new SlsaDependency(
                 "jackson-core-2.17.0.redhat-00001.jar",
                 Map.of("sha256", "55be130f6a68038088a261856c4e383ce79957a0fc1a29ecb213a9efd6ef4389", "sha1", "dummy-sha1-3", "md5", "dummy-md5-3"),
@@ -192,19 +221,24 @@ public class MockPncServiceAdapter implements PNCService {
                         "pkg:maven/com.fasterxml.jackson.core/jackson-core@2.17.0.redhat-00001?type=jar",
                         "https://nexus.acme.corp/api/content/maven/hosted/builds/...",
                         "8890",
-                        "BUILD-8890"
+                        "BUILD-8890",
+                        null
                 )
         );
 
-        SlsaPredicate predicate = new SlsaPredicate(List.of(
-                new SlsaDependency("repository", null, null, null), // Skip 1
-                new SlsaDependency("repository.downstream", null, null, null), // Skip 2
-                new SlsaDependency("environment", null, null, null), // Skip 3
-                dep1,
-                dep2,
-                dep3
-        ));
+        // --- BUILD DEFINITION (SLSA v1.0) ---
+        SlsaExternalParameters extParams = new SlsaExternalParameters(
+                Map.of("name", "acme-cloud-pack-2.0.0", "type", "MVN"),
+                Map.of("name", "OpenJDK 17.0; RHEL 8; Mvn 3.9.1"),
+                Map.of("uri", "https://git.acme.corp/acme-internal/acme-cloud-pack.git", "revision", "0.6.9")
+        );
+        SlsaBuildDefinition buildDef = new SlsaBuildDefinition("https://project-ncl.github.io/slsa-pnc-buildtypes/workflow/v1", extParams);
 
-        return new SlsaProvenance(predicate, List.of(subjectZip, subjectPom, subjectYaml));
+        SlsaPredicate predicate = new SlsaPredicate(
+                buildDef,
+                List.of(repoDep, repoDownstreamDep, envDep, dep1, dep2, dep3)
+        );
+
+        return new SlsaProvenance("https://slsa.dev/provenance/v1", predicate, List.of(subjectZip, subjectPom, subjectYaml));
     }
 }

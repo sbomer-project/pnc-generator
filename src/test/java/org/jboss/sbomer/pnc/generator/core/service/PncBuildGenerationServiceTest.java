@@ -12,6 +12,7 @@ import org.jboss.pnc.dto.Artifact;
 import org.jboss.pnc.dto.Build;
 import org.jboss.sbomer.events.orchestration.GenerationCreated;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaAnnotations;
+import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaDependency;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaPredicate;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaProvenance;
 import org.jboss.sbomer.pnc.generator.core.domain.slsa.SlsaSubject;
@@ -48,7 +49,7 @@ class PncBuildGenerationServiceTest {
 
     @BeforeEach
     void setUp() {
-        // Set standard config values via reflection (since @ConfigProperty doesn't inject in plain JUnit)
+        // Set standard config values via reflection
         try {
             setField(service, "toolName", "SBOMer NextGen");
             setField(service, "toolVersion", "1.0.0");
@@ -83,13 +84,19 @@ class PncBuildGenerationServiceTest {
         Artifact mockArtifact = Artifact.builder().id("ART-001").build();
         when(pncService.getBuiltArtifacts("BUILD-123")).thenReturn(List.of(mockArtifact));
 
-        // 3. Mock the SLSA Provenance
+        // 3. Mock the SLSA Provenance with the new v1.0 structure
         SlsaSubject subject = new SlsaSubject(
                 "test-app-1.0.0.redhat-00001.jar",
                 Map.of("sha256", "fakehash"),
-                new SlsaAnnotations(null, "pkg:maven/com.test/test-app@1.0.0.redhat-00001?type=jar", null, "ART-001", "BUILD-123")
+                new SlsaAnnotations(null, "pkg:maven/com.test/test-app@1.0.0.redhat-00001?type=jar", null, "ART-001", "BUILD-123", null)
         );
-        SlsaProvenance mockProvenance = new SlsaProvenance(new SlsaPredicate(List.of()), List.of(subject));
+
+        // Add mocked environment and repository nodes to test the new pedigree/environment extraction logic
+        SlsaDependency repoDep = new SlsaDependency("repository", Map.of("gitCommit", "12345abcde"), "https://github.com/test/repo.git", null);
+        SlsaDependency envDep = new SlsaDependency("environment", Map.of("sha256", "dockerhash"), "quay.io/test/builder", new SlsaAnnotations(null, null, null, null, null, "latest"));
+
+        SlsaPredicate predicate = new SlsaPredicate(null, List.of(repoDep, envDep));
+        SlsaProvenance mockProvenance = new SlsaProvenance("https://slsa.dev/provenance/v1", predicate, List.of(subject));
         when(pncService.getBuildProvenance("ART-001")).thenReturn(mockProvenance);
 
         // 4. Mock the storage upload
@@ -112,6 +119,8 @@ class PncBuildGenerationServiceTest {
         assertNotNull(generatedJson);
         assertTrue(generatedJson.contains("CycloneDX"));
         assertTrue(generatedJson.contains("pkg:maven/com.test/test-app@1.0.0.redhat-00001"));
+        assertTrue(generatedJson.contains("12345abcde"), "Git commit was not extracted from provenance repository node");
+        assertTrue(generatedJson.contains("quay.io/test/builder"), "Builder image was not extracted from provenance environment node");
 
         verify(statusUpdateService).reportFinished("GEN-999", List.of("http://storage/GEN-999/sbom.json"));
     }
@@ -150,7 +159,7 @@ class PncBuildGenerationServiceTest {
         Artifact mockArtifact = Artifact.builder().id("ART-001").build();
         when(pncService.getBuiltArtifacts("BUILD-123")).thenReturn(List.of(mockArtifact));
 
-        when(pncService.getBuildProvenance("ART-001")).thenReturn(new SlsaProvenance(null, null)); // Null subject
+        when(pncService.getBuildProvenance("ART-001")).thenReturn(new SlsaProvenance(null, null, null)); // Null subject
 
         RuntimeException thrown = assertThrows(RuntimeException.class, () -> service.processGeneration(mockEvent));
 
