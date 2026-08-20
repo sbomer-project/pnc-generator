@@ -28,8 +28,8 @@ import io.quarkus.arc.profile.IfBuildProfile;
 import lombok.extern.slf4j.Slf4j;
 
 @ApplicationScoped
-// Temporarily prod until our external service is ready, then switch to mock
-@IfBuildProfile("prod")
+// To go back to using pnc mock, set to prod
+@IfBuildProfile("mock")
 @Alternative
 @Priority(1)
 @Slf4j
