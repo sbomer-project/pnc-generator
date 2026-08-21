@@ -5,6 +5,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.URI;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,7 +42,11 @@ public class PncServiceAdapter implements PNCService {
     @PostConstruct
     void init() {
         log.info("Initializing official PNC Clients with URL: {}", pncApiUrl);
-        Configuration config = Configuration.builder().host(pncApiUrl).protocol("http").build();
+        URI uri = URI.create(pncApiUrl);
+        Configuration config = Configuration.builder()
+                .host(uri.getHost() + (uri.getPort() == -1 ? "" : ":" + uri.getPort()))
+                .protocol(uri.getScheme())
+                .build();
         this.buildClient = new BuildClient(config);
     }
 
